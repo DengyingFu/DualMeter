@@ -1,0 +1,5 @@
+/dist/
+/.vs/
+*.user
+*.suo
+Thumbs.db
