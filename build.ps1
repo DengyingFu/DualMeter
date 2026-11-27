@@ -39,6 +39,7 @@ try {
         '/nologo', '/target:winexe', '/platform:anycpu', '/optimize+', '/codepage:65001',
         '/out:..\dist\DualMeter.exe',
         '/resource:Dashboard.xaml,Dashboard.xaml',
+        '/resource:WidgetMenu.xaml,WidgetMenu.xaml',
         '/resource:CodexMark.png,CodexMark.png',
         '/resource:AntigravityMark.png,AntigravityMark.png',
         '/win32icon:dual.ico',

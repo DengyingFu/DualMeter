@@ -56,6 +56,8 @@ namespace DualMeter
                 RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
                 StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8
             };
+            // Quota polls must not spawn the CLI's separate periodic update process.
+            start.EnvironmentVariables["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true";
             using (var process = Process.Start(start))
             {
                 process.StandardInput.Close();

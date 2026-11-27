@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Windows;
 using System.Windows.Automation;
@@ -54,11 +55,11 @@ namespace DualMeter
     {
         private readonly bool circular;
         private int? value;
-        public int? Value { set { this.value = value; InvalidateVisual(); } }
+        public int? Value { set { if (this.value != value) { this.value = value; InvalidateVisual(); } } }
         public Gauge(bool circular)
         {
             this.circular = circular;
-            if (circular) Width = Height = 32;
+            if (circular) Width = Height = 27;
             else Height = 7;
             IsHitTestVisible = false;
         }
@@ -77,7 +78,7 @@ namespace DualMeter
                 return;
             }
             var center = new Point(ActualWidth / 2, ActualHeight / 2);
-            const double thickness = 3;
+            const double thickness = 2.6;
             double radius = Math.Min(center.X, center.Y) - thickness / 2 - 0.5;
             dc.DrawEllipse(null, new Pen(Ink.Track, thickness), center, radius, radius);
             if (!value.HasValue || value <= 0) return;
@@ -104,8 +105,16 @@ namespace DualMeter
         private readonly TextBlock[] values = new TextBlock[2];
         private readonly Border[] warnings = new Border[2];
         private readonly FrameworkElement root;
+        private readonly Border summary;
+        private readonly DockPanel drawer;
+        private readonly Grid pointerStrip;
+        private readonly List<Reading> displayedRows = new List<Reading>();
+        private bool showingLoadingRow;
         private int current = -1;
         public FrameworkElement View { get { return root; } }
+        public Size CompactSize { get { return WithMargin(summary.Width, summary.Height); } }
+        public Size SurfaceLimit { get { return WithMargin(root.MaxWidth, root.MaxHeight); } }
+        public Point ScreenAnchor { get { return summary.PointToScreen(new Point(summary.ActualWidth / 2, -root.Margin.Top)); } }
         public event Action<int> Selected;
         public event Action RefreshRequested;
         public event Action CollapseRequested;
@@ -114,13 +123,44 @@ namespace DualMeter
         {
             using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("Dashboard.xaml"))
                 root = (FrameworkElement)XamlReader.Load(stream);
+            summary = Find<Border>("Summary");
+            drawer = Find<DockPanel>("Drawer");
+            pointerStrip = Find<Grid>("PointerStrip");
             buttons = new[] { Find<Button>("CodexButton"), Find<Button>("GravityButton") };
             for (int i = 0; i < buttons.Length; i++) BuildTile(i);
-            Find<Button>("Refresh").Click += delegate { if (RefreshRequested != null) RefreshRequested(); };
-            Find<Button>("Fold").Click += delegate { if (CollapseRequested != null) CollapseRequested(); };
+            var refresh = Find<Button>("Refresh");
+            var fold = Find<Button>("Fold");
+            PrepareHint(refresh);
+            PrepareHint(fold);
+            refresh.Click += delegate { if (RefreshRequested != null) RefreshRequested(); };
+            fold.Click += delegate { if (CollapseRequested != null) CollapseRequested(); };
         }
 
         private T Find<T>(string name) where T : FrameworkElement { return (T)root.FindName(name); }
+        private Size WithMargin(double width, double height)
+        {
+            Thickness margin = root.Margin;
+            return new Size(width + margin.Left + margin.Right, height + margin.Top + margin.Bottom);
+        }
+
+        public void Place(double leftInset, bool openAbove, double surfaceWidth)
+        {
+            // The summary and pointer share the same horizontal anchor even at a screen edge.
+            summary.HorizontalAlignment = pointerStrip.HorizontalAlignment = HorizontalAlignment.Left;
+            summary.Margin = pointerStrip.Margin = new Thickness(leftInset, 0, 0, 0);
+            Dock dock = openAbove ? Dock.Bottom : Dock.Top;
+            DockPanel.SetDock(summary, dock);
+            DockPanel.SetDock(pointerStrip, dock);
+            pointerStrip.RenderTransform = openAbove ? new ScaleTransform(1, -1) : Transform.Identity;
+            drawer.VerticalAlignment = openAbove ? VerticalAlignment.Bottom : VerticalAlignment.Top;
+            drawer.Width = Math.Max(0, Math.Min(root.MaxWidth, surfaceWidth - root.Margin.Left - root.Margin.Right));
+        }
+
+        public void SetBackgroundOpacity(double opacity)
+        {
+            root.Resources["BackdropOpacity"] = opacity;
+        }
+
         private static TextBlock Text(string value, double size, Brush brush, FontWeight weight)
         {
             return new TextBlock { Text = value, FontSize = size, Foreground = brush, FontWeight = weight };
@@ -153,21 +193,27 @@ namespace DualMeter
             var icon = new Grid { HorizontalAlignment=HorizontalAlignment.Center };
             rings[index] = new Gauge(true);
             icon.Children.Add(rings[index]);
-            icon.Children.Add(Symbol(index, 19, Ink.White));
+            icon.Children.Add(Symbol(index, 16, Ink.White));
             warnings[index] = new Border { Width=6,Height=6,CornerRadius=new CornerRadius(3),
                 BorderBrush=Ink.Track,BorderThickness=new Thickness(1),Background=Ink.Amber,
                 HorizontalAlignment=HorizontalAlignment.Right, VerticalAlignment=VerticalAlignment.Top,
                 Visibility=Visibility.Collapsed };
             icon.Children.Add(warnings[index]);
             content.Children.Add(icon);
-            values[index] = Text("—", 14, Ink.White, FontWeights.SemiBold);
+            values[index] = Text("—", 13, Ink.White, FontWeights.SemiBold);
             values[index].HorizontalAlignment = HorizontalAlignment.Center;
             values[index].Margin = new Thickness(0,1,0,0);
             content.Children.Add(values[index]);
             buttons[index].Content = content;
             buttons[index].Padding = new Thickness(0);
             var button = buttons[index];
-            var hint = new ToolTip { HasDropShadow = false };
+            PrepareHint(button);
+            button.Click += delegate { if (Selected != null) Selected(index); };
+        }
+
+        private static void PrepareHint(Button button)
+        {
+            var hint = new ToolTip { Content = button.ToolTip, HasDropShadow = false };
             button.ToolTip = hint;
             ToolTipService.SetBetweenShowDelay(button, 0);
             button.PreviewMouseDown += delegate {
@@ -175,7 +221,11 @@ namespace DualMeter
                 if (hint.IsOpen) hint.IsOpen = false;
             };
             button.MouseLeave += delegate { ToolTipService.SetIsEnabled(button, true); };
-            buttons[index].Click += delegate { if (Selected != null) Selected(index); };
+            button.IsVisibleChanged += delegate {
+                if (button.IsVisible) return;
+                if (hint.IsOpen) hint.IsOpen = false;
+                ToolTipService.SetIsEnabled(button, true);
+            };
         }
 
         private void UpdateTile(int i, bool selected, ServiceState state)
@@ -198,10 +248,9 @@ namespace DualMeter
 
         public void Render(int selected, ServiceState[] states)
         {
-            root.Width = selected < 0 ? Find<Border>("Summary").Width : 246;
             for (int i = 0; i < 2; i++) UpdateTile(i, selected == i, states[i]);
-            Find<StackPanel>("Drawer").Visibility = selected < 0 ? Visibility.Collapsed : Visibility.Visible;
-            if (selected < 0) { current = -1; return; }
+            drawer.Visibility = selected < 0 ? Visibility.Collapsed : Visibility.Visible;
+            if (selected < 0) return;
             if (current != selected)
             {
                 Find<ScrollViewer>("InfoScroll").ScrollToTop();
@@ -217,11 +266,17 @@ namespace DualMeter
             var banner = Find<TextBlock>("Notice");
             banner.Text = notice;
             banner.Visibility = String.IsNullOrWhiteSpace(notice) ? Visibility.Collapsed : Visibility.Visible;
-            var rows = Find<StackPanel>("Rows");
-            rows.Children.Clear();
-            foreach (var entry in state.Rows) rows.Children.Add(Row(entry));
-            if (state.Rows.Count == 0 && state.Busy)
-                rows.Children.Add(Text("正在读取额度…", 13, Ink.Muted, FontWeights.Normal));
+            bool loading = state.Rows.Count == 0 && state.Busy;
+            if (loading != showingLoadingRow || !displayedRows.SequenceEqual(state.Rows))
+            {
+                var rows = Find<StackPanel>("Rows");
+                rows.Children.Clear();
+                foreach (var entry in state.Rows) rows.Children.Add(Row(entry));
+                if (loading) rows.Children.Add(Text("正在读取额度…", 13, Ink.Muted, FontWeights.Normal));
+                displayedRows.Clear();
+                displayedRows.AddRange(state.Rows);
+                showingLoadingRow = loading;
+            }
             string status = state.Busy ? "正在刷新…" : state.Updated.HasValue ?
                 state.Updated.Value.ToLocalTime().ToString(state.Updated.Value.ToLocalTime().Date == DateTime.Today ? "HH:mm:ss 更新" : "MM/dd HH:mm 更新") :
                 String.IsNullOrEmpty(state.Error) ? "等待读数" : "等待重试";
@@ -230,7 +285,7 @@ namespace DualMeter
 
         private FrameworkElement Row(Reading entry)
         {
-            var stack = new StackPanel { Margin=new Thickness(1,7,1,0) };
+            var stack = new StackPanel { Margin=new Thickness(1,6,1,0) };
             var title = new DockPanel();
             string percent = entry.Remaining.HasValue ? entry.Remaining.Value + "%" : "—";
             var amount = Text(percent,14,Ink.White,FontWeights.SemiBold);
